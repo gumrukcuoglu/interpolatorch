@@ -10,8 +10,9 @@ Some interpolation functions/classes that are compatible with autograd in torch
 
 History: 
     v0.1    11/7/2024 - Initial version, single function interpolation
-    v0.2    18/7/2024 - Implemented parallel handling of independent interpolations.
+    v0.2    18/9/2024 - Implemented parallel handling of independent interpolations.
                         Old version still available with "_legacy" suffix.
+            20/9/2024 - Fixed a forgotten contiguous conversion for already batched parameters
 """
 
 
@@ -85,7 +86,7 @@ class InterpolateLinear:
         
         # If separate z lists not provided, expand:
         if len(z_list) == self.N_b:
-            z_expand = z_list
+            z_expand = z_list.contiguous()
         else:
             z_expand = z_list.expand(torch.Size([self.N_b]) + z_list.shape).contiguous()
         
@@ -210,7 +211,7 @@ class CubicSplines:
         
         # If separate z lists not provided, expand:
         if len(z_list) == self.N_b:
-            z_expand = z_list
+            z_expand = z_list.contiguous()
         else:
             z_expand = z_list.expand(torch.Size([self.N_b]) + z_list.shape).contiguous()
         
