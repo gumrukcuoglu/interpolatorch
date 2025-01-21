@@ -3,10 +3,15 @@ This is a simple module which contains vectorised interpolators for linear and c
 
 # History: 
 
-- v0.1    11/7/2024 - Initial version, single function interpolation, both linear and cubic spline.
+- v0.3    21/1/2025 - Added monotonic cubic interpolation (PCHIP)
 - v0.2    18/9/2024 - Implemented parallel handling of independent interpolations\
           20/9/2024 - Fixed a forgotten contiguous conversion for already batched parameters
-- v0.3    21/1/2025 - Added monotonic cubic interpolation (PCHIP)
+- v0.1    11/7/2024 - Initial version, single function interpolation, both linear and cubic spline.
+
+# Installation
+Install via `pip`:
+
+    pip install git+https://github.com/gumrukcuoglu/interpolatorch
 
 # Usage:
 Initialise the interpolation function with:
