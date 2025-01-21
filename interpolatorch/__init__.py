@@ -248,6 +248,108 @@ class CubicSplines:
         
         return f_list
 
+
+class PCHIP:
+    
+    """
+    
+    Given N_b independent sets of ordered knots (z_knots, f_knots) generate N_b 
+    monotonic interpolations f(z). 
+      
+    z_knots: torch tensor (shape N_b x N_t) [second axis in ascending order]
+    f_knots: torch tensor (shape N_b x N_t) [monotonic values assumed]
+
+    Extrapolation not implemented. Any f(z) for z \notin [min(z_knots), max(z_knots] will 
+    evaluate to nan.
+    
+    All inputs need to be torch tensors.
+    See Fritsch/Carlson 1980 and
+        Fritsch/Butland 1984
+    """
+    
+    def __init__(self, z_knots, f_knots, extrapolate=False, ext=0, ext_value=None):
+        self.z_knots = z_knots
+        self.f_knots = f_knots
+        self.N_b, *_, self.N_t = z_knots.shape  # Keep number of independent 
+                                                # data and number of z_knots
+
+        # Step sizes
+        h = torch.diff(self.z_knots, dim=-1) 
+        df = torch.diff(self.f_knots, dim=-1)
+
+        # 2-point right derivative:
+        Delta = df/h
+        # Inverses 1/Delta_i and 1/Delta_{i-1}
+        atleD_i = 1./Delta[...,1:]
+        atleD_im = 1./Delta[...,:-1]
+        # Weight for the derivative estimate
+        gamma = (1+1/(h[...,:-1]/h[...,1:]+1))/3
+
+        # Determine points where Delta vanishes
+        zero_mask = Delta ==0
+        # And include i+1
+        zero_mask[..., 1:] |= zero_mask[..., :-1].clone()
+
+        # Estimate the first derivative [a la Fritsch/Butland G(S1,S2,h1,h2)]
+        d_i = torch.zeros_like(f_knots)
+        d_i[..., 1:-1] = (1./(gamma*atleD_im + (1-gamma)*atleD_i))
+
+        # Set the boundary as the 2-point finite difference (one-sided)
+        d_i[..., 0] = Delta[...,0]
+        d_i[..., -1] = Delta[...,-1]
+        # Set the derivatives to zero for repeating points.
+        d_i[...,:-1][zero_mask]= 0.
+
+        # Compute the coefficients for y = a + b dz + c dz^2 +d dz^3
+        self.a = f_knots[...,:-1]
+        self.b = d_i[...,:-1]
+        self.c = (3*Delta - 2*d_i[...,:-1] - d_i[...,1:])/h
+        self.d = (d_i[...,:-1] + d_i[...,1:] - 2*Delta)/h**2
+
+        self.L_edges = z_knots[:,:1]
+        self.R_edges = z_knots[:,-1:]
+
+        # Values at left/right boundary
+        self.f_L = self.a[...,:1]
+        dz_R = z_knots[...,-1:]-z_knots[...,-2:-1]
+        self.f_R = self.a[...,-1:] + self.b[...,-1:]*dz_R + self.c[...,-1:]*dz_R**2 + self.d[...,-1:]*dz_R**3 
+    
+    def __call__(self, z_list):
+        
+        # If separate z lists not provided, expand:
+        if len(z_list) == self.N_b:
+            z_expand = z_list.contiguous()
+        else:
+            z_expand = z_list.expand(torch.Size([self.N_b]) + z_list.shape).contiguous()
+        
+        # Flatten z_list to 1D for easier processing
+        z_flat = z_expand.flatten(start_dim=1)
+        
+        # Compute the indices for the left neighbors
+        L_idx = torch.clamp(torch.searchsorted(self.z_knots, z_flat) - 1, 0, self.N_t - 2)
+
+        # Left neighbour of each point
+        z_L = torch.gather(self.z_knots, dim=1, index=L_idx)
+        
+        dz = z_flat - z_L
+     
+        f_flat = torch.gather(self.a, 1, L_idx) + torch.gather(self.b, 1, L_idx) * dz + torch.gather(self.c, 1, L_idx) * dz**2 + torch.gather(self.d, 1, L_idx) * dz**3
+        
+        L_mask = z_flat < self.L_edges # left of left boundary
+        R_mask = z_flat > self.R_edges # right of right boundary
+      
+        f_flat = torch.where(L_mask | R_mask, 
+                             torch.tensor(float('nan'), device=z_flat.device, dtype=z_flat.dtype), 
+                             f_flat)
+        
+        # Reshape to match the input list
+        f_list = f_flat.view_as(z_expand)
+        
+        return f_list
+
+
+### LEGACY CODES from v0.1
+
 class InterpolateLinear_legacy:
     """
     Given knots (z_knots, f_knots) generate linear interpolation 

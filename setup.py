@@ -1,8 +1,8 @@
 from setuptools import setup
 
 setup(name='interpolatorch',
-      version='0.2',
-      description='Simple interpolator for pytorch',
+      version='0.3',
+      description='Parallel interpolators for pytorch',
       url='http://github.com/gumrukcuoglu/interpolatorch',
       author='Emir Gumrukcuoglu',
       author_email='emiramca@gmail.com',
