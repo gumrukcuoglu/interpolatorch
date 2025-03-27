@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+  - family-names: Gumrukcuoglu
+    given-names: Emir
+    orcid: https://orcid.org/0000-0002-6783-9236
+title: "interpolatorch"
+version: 0.3
+date-released: 2025-01-21
+url: "https://github.com/gumrukcuoglu/interpolatorch"
