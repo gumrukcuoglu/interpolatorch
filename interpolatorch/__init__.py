@@ -46,7 +46,9 @@ class InterpolateLinear:
     """
     
     def __init__(self, z_knots, f_knots, extrapolate=False, ext=0, ext_value=None):
-        self.z_knots = z_knots
+        # If z_knots non-contiguous, make it so
+        self.z_knots = z_knots if z_knots.is_contiguous() else z_knots.contiguous()
+        # self.z_knots = z_knots
         self.f_knots = f_knots
         self.extrapolate = extrapolate # Should I extrapolate?
         self.ext = ext # extrapolation style
@@ -60,9 +62,9 @@ class InterpolateLinear:
         
         # Linear function az+b based on left neighbour:
         self.a= df/h
-        self.b= f_knots[...,:-1]
-        self.L_edges = z_knots[:,:1]
-        self.R_edges = z_knots[:,-1:]
+        self.b= self.f_knots[...,:-1]
+        self.L_edges = self.z_knots[:,:1]
+        self.R_edges = self.z_knots[:,-1:]
         
         if (ext not in [0,1,2]) and extrapolate:
             raise Exception("Extrapolation requested, but ext should be either 0, 1 or 2.")
@@ -71,29 +73,32 @@ class InterpolateLinear:
         if (ext_value==None) or (ext==1): 
             # Values at left/right boundary
             self.f_L = self.b[:,:1]
-            self.f_R = self.a[:,-1:]*(z_knots[:,-1:]-z_knots[:,-2:-1]) + self.b[:,-1:]
+            self.f_R = self.a[:,-1:]*(self.z_knots[:,-1:]-self.z_knots[:,-2:-1]) + self.b[:,-1:]
         elif ext==2:
             try:
                 self.f_L, self.f_R = ext_value
             except:
                 raise Exception("ext_value should be a list/tuple/tensor of size 2. ext=2 option sets the same boundary values for all data points.")
         
-        h = torch.diff(z_knots, dim=-1) 
-        df = torch.diff(f_knots, dim=-1)
+        # nan tensor that might be needed later repeatedly
+        self._nan = torch.tensor(float("nan"), device=f_knots.device, dtype=f_knots.dtype)
+        
 
-    
+
     def __call__(self, z_list):
         
         # If separate z lists not provided, expand:
         if len(z_list) == self.N_b:
-            z_expand = z_list.contiguous()
+            z_expand = z_list if z_list.is_contiguous() else z_list.contiguous()
         else:
-            z_expand = z_list.expand(torch.Size([self.N_b]) + z_list.shape).contiguous()
+            z_expand = z_list if z_list.is_contiguous() else z_list.contiguous()
+            z_expand = z_expand.expand(torch.Size([self.N_b]) + z_list.shape)
         
         
         # Flatten z_list to 1D for easier processing
         z_flat = z_expand.flatten(start_dim=1)
-        
+        z_flat = z_flat if z_flat.is_contiguous() else z_flat.contiguous()
+
         # Compute the indices for the left neighbors
         L_idx = torch.clamp(torch.searchsorted(self.z_knots, z_flat) - 1, 0, self.N_t - 2)
         
@@ -111,9 +116,11 @@ class InterpolateLinear:
 
         
         if not self.extrapolate: # Set out-of-bound values to NaN
-            f_flat = torch.where(L_mask | R_mask, 
-                                 torch.tensor(float('nan'), device=z_flat.device, dtype=z_flat.dtype), 
-                                 f_flat)
+            # f_flat = torch.where(L_mask | R_mask, 
+            #                      torch.tensor(float('nan'), device=z_flat.device, dtype=z_flat.dtype), 
+            #                      f_flat)
+            
+            f_flat = torch.where(L_mask | R_mask, self._nan, f_flat)
         elif self.ext>0: # Set out-of-bound values to the pre-defined constant
                     
             f_flat = torch.where(L_mask, self.f_L, f_flat)

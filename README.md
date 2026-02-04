@@ -3,10 +3,11 @@ This is a simple module which contains vectorised interpolators for linear and c
 
 # History: 
 
-- v0.3    21/1/2025 - Added monotonic cubic interpolation (PCHIP)
-- v0.2    18/9/2024 - Implemented parallel handling of independent interpolations\
-          20/9/2024 - Fixed a forgotten contiguous conversion for already batched parameters
-- v0.1    11/7/2024 - Initial version, single function interpolation, both linear and cubic spline.
+- v0.4    04/02/2026 - Minor optimisation of contiguous conversion in `InterpolateLinear` only
+- v0.3    21/01/2025 - Added monotonic cubic interpolation (PCHIP)
+- v0.2    18/09/2024 - Implemented parallel handling of independent interpolations
+          20/09/2024 - Fixed a forgotten contiguous conversion for already batched parameters
+- v0.1    11/07/2024 - Initial version, single function interpolation, both linear and cubic spline.
 
 # Installation
 Install via `pip`:
@@ -32,4 +33,5 @@ If extrapolating:
 Note that `PCHIP` does not have extrapolation option.
 
 # To do:
-Currently, a single pair of extrapolation values are supported in `ext = 2` option. Separate pairs for each interpolation functions will be supported... if I need it.
+- Currently, a single pair of extrapolation values are supported in `ext = 2` option. Separate pairs for each interpolation functions will be supported... if I need it.
+- The v0.4 optimisation needs to be extended to `CubicSplines` and `PCHIP`.
