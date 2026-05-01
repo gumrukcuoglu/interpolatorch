@@ -9,10 +9,14 @@ Some interpolation functions/classes that are compatible with autograd in torch
 @author: emirg
 
 History: 
-    v0.1    11/7/2024 - Initial version, single function interpolation
-    v0.2    18/9/2024 - Implemented parallel handling of independent interpolations.
+    v0.1    11/07/2024 - Initial version, single function interpolation
+    v0.2    18/09/2024 - Implemented parallel handling of independent interpolations.
                         Old version still available with "_legacy" suffix.
-            20/9/2024 - Fixed a forgotten contiguous conversion for already batched parameters
+            20/09/2024 - Fixed a forgotten contiguous conversion for already batched parameters
+    v0.3    21/01/2025 - Added monotonic cubic interpolation (PCHIP)
+    v0.4    04/02/2026 - Minor optimisation of contiguous conversion in InterpolateLinear only
+    v0.5    01/05/2026 - Extrapolation functionality to PCHIP, removed legacy code.
+
 """
 
 
@@ -257,38 +261,48 @@ class CubicSplines:
 
 
 class PCHIP:
-    
+
     """
-    
-    Given N_b independent sets of ordered knots (z_knots, f_knots) generate N_b 
-    monotonic interpolations f(z). 
-      
+
+    Given N_b independent sets of ordered knots (z_knots, f_knots) generate N_b
+    monotonic interpolations f(z).
+
     z_knots: torch tensor (shape N_b x N_t) [second axis in ascending order]
     f_knots: torch tensor (shape N_b x N_t) [monotonic values assumed]
 
-    Extrapolation not implemented. Any f(z) for z \notin [min(z_knots), max(z_knots] will 
-    evaluate to nan.
-    
+    Extrapolation: (if extrapolate == True)
+    ext = 0  # linear endpoint extrapolation (with a handwavy left edge handling)
+    ext = 1  # constant extension
+    ext = 2  # prescribed left/right fill values ext_value=[left, right]
+
+    ext_value: list of length 2, [left_boundary_value, right_boundary_value].
+               Sets the same extrapolation value for all interpolated functions.
+               Ignored unless extrapolate==True and ext==2.
+
+
     All inputs need to be torch tensors.
     See Fritsch/Carlson 1980 and
         Fritsch/Butland 1984
     """
-    
+
     def __init__(self, z_knots, f_knots, extrapolate=False, ext=0, ext_value=None):
         self.z_knots = z_knots
         self.f_knots = f_knots
-        self.N_b, *_, self.N_t = z_knots.shape  # Keep number of independent 
+        self.N_b, *_, self.N_t = z_knots.shape  # Keep number of independent
                                                 # data and number of z_knots
 
         # Step sizes
-        h = torch.diff(self.z_knots, dim=-1) 
+        h = torch.diff(self.z_knots, dim=-1)
         df = torch.diff(self.f_knots, dim=-1)
 
         # 2-point right derivative:
         Delta = df/h
+        safe_Delta = torch.where(Delta == 0, torch.ones_like(Delta), Delta)
+
         # Inverses 1/Delta_i and 1/Delta_{i-1}
-        atleD_i = 1./Delta[...,1:]
-        atleD_im = 1./Delta[...,:-1]
+        atleD_i = 1./safe_Delta[...,1:]
+        atleD_im = 1./safe_Delta[...,:-1]
+
         # Weight for the derivative estimate
         gamma = (1+1/(h[...,:-1]/h[...,1:]+1))/3
 
@@ -313,167 +327,87 @@ class PCHIP:
         self.c = (3*Delta - 2*d_i[...,:-1] - d_i[...,1:])/h
         self.d = (d_i[...,:-1] + d_i[...,1:] - 2*Delta)/h**2
 
-        self.L_edges = z_knots[:,:1]
-        self.R_edges = z_knots[:,-1:]
+        self.L_edges = z_knots[...,:1]
+        self.R_edges = z_knots[...,-1:]
 
         # Values at left/right boundary
-        self.f_L = self.a[...,:1]
-        dz_R = z_knots[...,-1:]-z_knots[...,-2:-1]
-        self.f_R = self.a[...,-1:] + self.b[...,-1:]*dz_R + self.c[...,-1:]*dz_R**2 + self.d[...,-1:]*dz_R**3 
-    
+        self.f_L = f_knots[..., :1]
+        self.f_R = f_knots[..., -1:]
+
+        self.extrapolate = extrapolate
+        self.ext = ext
+
+        # Precompute boundary slopes and fill values in extrapolation
+        if self.extrapolate:
+            if self.ext == 0:
+
+                nonzero = Delta != 0
+                first_idx = nonzero.float().argmax(dim=-1, keepdim=True)
+
+                self.slope_L = torch.gather(Delta, dim=-1, index=first_idx)
+                self.slope_R = Delta[..., -1:]
+            elif self.ext == 2:
+                if ext_value is None:
+                    raise ValueError("ext_value must be provided when ext=2.")
+                try:
+                    val_L, val_R = ext_value
+                    self.ext_tensor_L = torch.as_tensor(val_L, dtype=f_knots.dtype, device=f_knots.device)
+                    self.ext_tensor_R = torch.as_tensor(val_R, dtype=f_knots.dtype, device=f_knots.device)
+                except (TypeError, ValueError):
+                    raise Exception("ext_value should be a list/tuple/tensor of size 2.")
+
+            if self.ext not in (0, 1, 2):
+                raise ValueError(f"Unknown extrapolation mode ext={self.ext}")
+
     def __call__(self, z_list):
-        
+
         # If separate z lists not provided, expand:
         if len(z_list) == self.N_b:
             z_expand = z_list.contiguous()
         else:
             z_expand = z_list.expand(torch.Size([self.N_b]) + z_list.shape).contiguous()
-        
+
         # Flatten z_list to 1D for easier processing
         z_flat = z_expand.flatten(start_dim=1)
-        
+
         # Compute the indices for the left neighbors
         L_idx = torch.clamp(torch.searchsorted(self.z_knots, z_flat) - 1, 0, self.N_t - 2)
 
         # Left neighbour of each point
         z_L = torch.gather(self.z_knots, dim=1, index=L_idx)
-        
+
         dz = z_flat - z_L
-     
+
         f_flat = torch.gather(self.a, 1, L_idx) + torch.gather(self.b, 1, L_idx) * dz + torch.gather(self.c, 1, L_idx) * dz**2 + torch.gather(self.d, 1, L_idx) * dz**3
-        
+
         L_mask = z_flat < self.L_edges # left of left boundary
         R_mask = z_flat > self.R_edges # right of right boundary
-      
-        f_flat = torch.where(L_mask | R_mask, 
-                             torch.tensor(float('nan'), device=z_flat.device, dtype=z_flat.dtype), 
-                             f_flat)
-        
+
+        ext_mask = L_mask | R_mask
+
+        if not self.extrapolate:
+            f_flat = torch.where(ext_mask,
+                                 torch.tensor(float('nan'), device=z_flat.device, dtype=z_flat.dtype),
+                                 f_flat)
+
+
+        elif self.ext == 0:
+            # Linear extension using endpoint PCHIP slopes (precomputed)
+            f_flat = torch.where(L_mask, self.f_L + self.slope_L * (z_flat - self.L_edges), f_flat)
+            f_flat = torch.where(R_mask, self.f_R + self.slope_R * (z_flat - self.R_edges), f_flat)
+
+        elif self.ext == 1:
+            # Constant extension: monotone and bounded
+            f_flat = torch.where(L_mask, self.f_L, f_flat)
+            f_flat = torch.where(R_mask, self.f_R, f_flat)
+        elif self.ext == 2:
+            # Fixed fill values [Left, Right]
+            f_flat = torch.where(L_mask, self.ext_tensor_L, f_flat)
+            f_flat = torch.where(R_mask, self.ext_tensor_R, f_flat)
+        else:
+            raise ValueError(f"Unknown extrapolation mode ext={self.ext}")
+
         # Reshape to match the input list
         f_list = f_flat.view_as(z_expand)
-        
-        return f_list
 
-
-### LEGACY CODES from v0.1
-
-class InterpolateLinear_legacy:
-    """
-    Given knots (z_knots, f_knots) generate linear interpolation 
-    function f(z). 
-    
-    z_knots: torch tensor (shape N) [should be in ascending order]
-    f_knots: torch tensor (shape N)
-    extrapolate: bool, if True extrapolates according to slopes at boundary
-                          False assigns nan to out-of-bound values.
-    
-    Legacy function. Use InterpolateLinear for batch interpolation.
-    
-    """
-    
-    def __init__(self, z_knots, f_knots, extrapolate=False):
-        self.z_knots = z_knots
-        self.f_knots = f_knots
-        self.extrapolate = extrapolate
-        
-        # Step sizes
-        h = torch.diff(self.z_knots) 
-        df = torch.diff(self.f_knots)
-        
-        # Linear function a z +b based on left neighbour:
-        self.a= df/h
-        self.b= f_knots[:-1]
-        
-    def __call__(self, z_list):
-        
-        # Flatten z_list to 1D for easier processing
-        z_flat = z_list.flatten()
-        
-        # Compute the indices for the left neighbors
-        L_idx = torch.clamp(torch.searchsorted(self.z_knots, z_flat) - 1, 0, len(self.z_knots) - 2)
-        
-        # Left neighbour of each point
-        z_L = self.z_knots[L_idx]
-        
-        dz = z_flat - z_L
-        f_flat = self.a[L_idx] * dz + self.b[L_idx]
-
-        if not self.extrapolate:
-            # Set out-of-bound values to NaN
-            f_flat = torch.where((z_flat < self.z_knots[0]) | (z_flat > self.z_knots[-1]), torch.tensor(float('nan'), device=z_flat.device, dtype=z_flat.dtype), f_flat)
-        
-        # Reshape to match the input list 
-        f_list = f_flat.view_as(z_list)
-        
-        return f_list
-    
-    
-class CubicSplines_legacy:
-    """
-    Given knots (z_knots, f_knots) generate cubic spline interpolation 
-    function f(z). 
-    Uses natural boundary conditions.
-    
-    z_knots: torch tensor (shape N) [should be in ascending order]
-    f_knots: torch tensor (shape N)
-    extrapolate: bool, if True extrapolates using the function at the boundaries.
-                          False assigns nan to out-of-bound values.
-    
-    Legacy function. Use CubicSplines for batch interpolation.
-    
-    """
-    
-    def __init__(self, z_knots, f_knots, extrapolate=True):
-        self.z_knots = z_knots
-        self.f_knots = f_knots
-        self.extrapolate = extrapolate
-        
-        # Number of intervals
-        n = len(z_knots) - 1
-        
-        # Step sizes
-        h = torch.diff(z_knots) 
-        
-        # Solve for spline coefficients using the tridiagonal matrix algorithm (TDMA)
-        
-        
-        # alpha_i = 3 (f_{i+2} - f_{i+1}) / h_{i+1} - 3 (f_{i+1} - f_{i}) / h_{i}
-        f_by_h_diff = (f_knots[1:] - f_knots[:-1]) / h
-        alpha = 3*torch.diff(f_by_h_diff)
-        
-        
-        # Create a dense tridiagonal matrix
-        A = torch.zeros((n-1, n-1), device=h.device, dtype=h.dtype)
-        
-        # Fill the three diagonals
-        A[range(n-1), range(n-1)] = 2 * (h[1:] + h[:-1])
-        A[range(n-2), range(1, n-1)] = h[1:-1]
-        A[range(1, n-1), range(n-2)] = h[1:-1]
-        
-        c_mid = torch.linalg.solve(A, alpha)
-        c_edges = torch.zeros(1, device=h.device, dtype=h.dtype)
-        
-        # Compute the other coefficients
-        self.c = torch.hstack([c_edges, c_mid, c_edges])
-        self.b = f_by_h_diff - h * (2 * self.c[:-1] + self.c[1:]) / 3
-        self.d = torch.diff(self.c) / (3 * h)
-        self.a = f_knots[:-1]
-    
-    def __call__(self, z_list):
-        # Flatten z_list to 1D for easier processing
-        z_flat = z_list.flatten()
-        
-        # Compute the indices for the left neighbors
-        L_idx = torch.clamp(torch.searchsorted(self.z_knots, z_flat) - 1, 0, len(self.z_knots) - 2)
-        
-        z_L = self.z_knots[L_idx]
-        
-        dz = z_flat - z_L
-        f_flat = self.a[L_idx] + self.b[L_idx] * dz + self.c[L_idx] * dz**2 + self.d[L_idx] * dz**3
-
-        if not self.extrapolate:
-            # Set out-of-bound values to NaN
-            f_flat = torch.where((z_flat < self.z_knots[0]) | (z_flat > self.z_knots[-1]), torch.tensor(float('nan'), device=z_flat.device, dtype=z_flat.dtype), f_flat)
-
-        f_list = f_flat.view_as(z_list)
         return f_list
